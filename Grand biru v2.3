@@ -1,0 +1,309 @@
+-- Refined Script with Cursed Fruit Tracker/ESP
+local CoreGui = game:GetService("CoreGui")
+local StarterGui = game:GetService("StarterGui")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local DiscordLink = "https://discord.gg/vfmjNqSwWM"
+
+local function sendNotification(title, text, duration)
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {Title = title, Text = text, Duration = duration or 2})
+    end)
+end
+
+local ConfigFolder = "AutoFarmConfig"
+local ConfigFile = ConfigFolder .. "/Settings.json"
+local DefaultSettings = { AntiAdmin = true }
+
+local function LoadConfig()
+    if isfolder and not isfolder(ConfigFolder) then pcall(function() makefolder(ConfigFolder) end) end
+    if isfile and isfile(ConfigFile) then
+        local success, result = pcall(function() return HttpService:JSONDecode(readfile(ConfigFile)) end)
+        if success and result then return result end
+    end
+    return DefaultSettings
+end
+
+local CurrentConfig = LoadConfig()
+local SAFE_ZONE_POS = Vector3.new(15000, 50000, 15000)
+local FISH_ZONE_CFRAME = CFrame.new(-344, -1, -971)
+
+getgenv().AutoFarmingRunning = true
+getgenv().AutoMineEnabled = false
+getgenv().AutoFishEnabled = false
+getgenv().FruitESPEnabled = true
+
+local uiName = "Custom_Base_UI"
+if CoreGui:FindFirstChild(uiName) then CoreGui[uiName]:Destroy() end
+
+local ScreenGui = Instance.new("ScreenGui", (gethui and gethui()) or CoreGui or PlayerGui)
+ScreenGui.Name = uiName
+
+local Main = Instance.new("Frame", ScreenGui)
+Main.Size = UDim2.new(0, 230, 0, 360)
+Main.Position = UDim2.new(0.5, -115, 0.5, -180)
+Main.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+Main.BorderSizePixel = 0
+
+local MainCorner = Instance.new("UICorner", Main)
+MainCorner.CornerRadius = UDim.new(0, 8)
+
+local Title = Instance.new("TextLabel", Main)
+Title.Size = UDim2.new(1, -25, 0, 28)
+Title.BackgroundColor3 = Color3.fromRGB(15, 15, 18)
+Title.TextColor3 = Color3.fromRGB(240, 240, 240)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 11
+Title.Text = "  GrandBlue Hub v2.2"
+
+local CloseBtn = Instance.new("TextButton", Main)
+CloseBtn.Size = UDim2.new(0, 25, 0, 28)
+CloseBtn.Position = UDim2.new(1, -25, 0, 0)
+CloseBtn.BackgroundTransparency = 1
+CloseBtn.TextColor3 = Color3.fromRGB(220, 60, 60)
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.Text = "✕"
+CloseBtn.MouseButton1Click:Connect(function() ScreenGui:Destroy() end)
+
+local Scroll = Instance.new("ScrollingFrame", Main)
+Scroll.Size = UDim2.new(1, -10, 1, -36)
+Scroll.Position = UDim2.new(0, 5, 0, 30)
+Scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+Scroll.BackgroundTransparency = 1
+Scroll.ScrollBarThickness = 2
+
+local Layout = Instance.new("UIListLayout", Scroll)
+Layout.Padding = UDim.new(0, 4)
+
+local uiOrder = 0
+local function addSeparator(text)
+    local sep = Instance.new("TextLabel", Scroll)
+    sep.Size = UDim2.new(1, 0, 0, 16)
+    sep.BackgroundTransparency = 1
+    sep.TextColor3 = Color3.fromRGB(130, 130, 140)
+    sep.Font = Enum.Font.GothamBold
+    sep.TextSize = 9
+    sep.Text = "— " .. string.upper(text) .. " —"
+    sep.LayoutOrder = uiOrder
+    uiOrder = uiOrder + 1
+end
+
+local function createTPButton(name, color, cframePos)
+    local btn = Instance.new("TextButton", Scroll)
+    btn.Size = UDim2.new(1, 0, 0, 24)
+    btn.Text = "TP " .. name
+    btn.BackgroundColor3 = color
+    btn.TextColor3 = Color3.fromRGB(240, 240, 240)
+    btn.Font = Enum.Font.GothamSemibold
+    btn.TextSize = 10
+    btn.LayoutOrder = uiOrder
+    uiOrder = uiOrder + 1
+    
+    local corner = Instance.new("UICorner", btn)
+    corner.CornerRadius = UDim.new(0, 5)
+    
+    btn.MouseButton1Click:Connect(function()
+        if LocalPlayer.Character then LocalPlayer.Character:PivotTo(cframePos) end
+    end)
+end
+
+-- ==================== 1. TELEPORT MENU ====================
+addSeparator("Teleports")
+createTPButton("Safe Zone", Color3.fromRGB(35, 90, 150), CFrame.new(SAFE_ZONE_POS))
+createTPButton("Blacksmith", Color3.fromRGB(150, 75, 35), CFrame.new(-201, 136, 554))
+createTPButton("Anchor Town", Color3.fromRGB(40, 110, 110), CFrame.new(246, 22, 308))
+createTPButton("Clown Town", Color3.fromRGB(40, 110, 110), CFrame.new(2668, 69, 417))
+
+-- ==================== 2. CURSED FRUIT TRACKER ====================
+addSeparator("Fruit Tracker & ESP")
+
+local FruitContainer = Instance.new("Frame", Scroll)
+FruitContainer.Size = UDim2.new(1, 0, 0, 70)
+FruitContainer.BackgroundColor3 = Color3.fromRGB(15, 15, 18)
+FruitContainer.LayoutOrder = uiOrder
+uiOrder = uiOrder + 1
+
+local FruitScroll = Instance.new("ScrollingFrame", FruitContainer)
+FruitScroll.Size = UDim2.new(1, -4, 1, -4)
+FruitScroll.Position = UDim2.new(0, 2, 0, 2)
+FruitScroll.BackgroundTransparency = 1
+FruitScroll.ScrollBarThickness = 2
+FruitScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+
+local FruitLayout = Instance.new("UIListLayout", FruitScroll)
+FruitLayout.Padding = UDim.new(0, 3)
+
+local function ScanFruits()
+    for _, child in pairs(FruitScroll:GetChildren()) do
+        if child:IsA("TextButton") then child:Destroy() end
+    end
+
+    local myChar = LocalPlayer.Character
+    local myPos = (myChar and myChar:FindFirstChild("HumanoidRootPart")) and myChar.HumanoidRootPart.Position or Vector3.zero
+    local found = false
+
+    for _, obj in ipairs(workspace:GetChildren()) do
+        local name = obj.Name
+        if string.find(name, "Fruit") or string.find(name, "Cursed") or obj:FindFirstChild("Handle") then
+            local pos = obj:IsA("Model") and (obj.PrimaryPart and obj.PrimaryPart.Position or obj:GetPivot().Position) or (obj:IsA("BasePart") and obj.Position)
+            
+            if pos then
+                found = true
+                local dist = myPos ~= Vector3.zero and math.floor((pos - myPos).Magnitude) or 0
+                
+                -- Highlight / ESP Effect
+                if getgenv().FruitESPEnabled and not obj:FindFirstChild("FruitESP") then
+                    local hl = Instance.new("Highlight")
+                    hl.Name = "FruitESP"
+                    hl.FillColor = Color3.fromRGB(255, 0, 120)
+                    hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+                    hl.Parent = obj
+                end
+
+                local btn = Instance.new("TextButton", FruitScroll)
+                btn.Size = UDim2.new(1, -2, 0, 20)
+                btn.BackgroundColor3 = Color3.fromRGB(120, 30, 80)
+                btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+                btn.Font = Enum.Font.GothamBold
+                btn.TextSize = 9
+                btn.Text = string.format(" 🍎 %s (%dm)", name, dist)
+                btn.TextXAlignment = Enum.TextXAlignment.Left
+
+                local corner = Instance.new("UICorner", btn)
+                corner.CornerRadius = UDim.new(0, 4)
+
+                btn.MouseButton1Click:Connect(function()
+                    if myChar then
+                        myChar:PivotTo(CFrame.new(pos + Vector3.new(0, 3, 0)))
+                        sendNotification("Fruit TP", "Teleport ke " .. name, 2)
+                    end
+                end)
+            end
+        end
+    end
+
+    if not found then
+        local lbl = Instance.new("TextButton", FruitScroll)
+        lbl.Size = UDim2.new(1, -2, 0, 20)
+        lbl.BackgroundTransparency = 1
+        lbl.TextColor3 = Color3.fromRGB(120, 120, 130)
+        lbl.Font = Enum.Font.Gotham
+        lbl.TextSize = 9
+        lbl.Text = " Tidak ada buah di sekitar"
+    end
+end
+
+-- ==================== 3. PLAYER TRACKER ====================
+addSeparator("Player Tracker")
+
+local TrackerContainer = Instance.new("Frame", Scroll)
+TrackerContainer.Size = UDim2.new(1, 0, 0, 90)
+TrackerContainer.BackgroundColor3 = Color3.fromRGB(15, 15, 18)
+TrackerContainer.LayoutOrder = uiOrder
+uiOrder = uiOrder + 1
+
+local TrackerScroll = Instance.new("ScrollingFrame", TrackerContainer)
+TrackerScroll.Size = UDim2.new(1, -4, 1, -4)
+TrackerScroll.Position = UDim2.new(0, 2, 0, 2)
+TrackerScroll.BackgroundTransparency = 1
+TrackerScroll.ScrollBarThickness = 2
+TrackerScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+
+local TrackerLayout = Instance.new("UIListLayout", TrackerScroll)
+TrackerLayout.Padding = UDim.new(0, 3)
+
+local function GetAdvancedPlayerStats(plr)
+    local lvl, bnt, fruit = "N/A", "N/A", "None"
+    if plr:GetAttribute("Level") then lvl = tostring(plr:GetAttribute("Level")) end
+    if plr:GetAttribute("Bounty") or plr:GetAttribute("Belly") then 
+        bnt = tostring(plr:GetAttribute("Bounty") or plr:GetAttribute("Belly")) 
+    end
+
+    local targets = {plr:FindFirstChild("leaderstats"), plr:FindFirstChild("Data"), plr:FindFirstChild("Stats")}
+    for _, folder in ipairs(targets) do
+        if folder then
+            for _, val in ipairs(folder:GetChildren()) do
+                local name = string.lower(val.Name)
+                if string.find(name, "level") or string.find(name, "lvl") then lvl = tostring(val.Value) end
+                if string.find(name, "bounty") or string.find(name, "belly") or string.find(name, "berries") then bnt = tostring(val.Value) end
+                if string.find(name, "fruit") then fruit = tostring(val.Value) end
+            end
+        end
+    end
+
+    if fruit == "None" then
+        local searchContainers = {}
+        if plr.Character then table.insert(searchContainers, plr.Character) end
+        if plr:FindFirstChild("Backpack") then table.insert(searchContainers, plr.Backpack) end
+        for _, container in ipairs(searchContainers) do
+            for _, item in ipairs(container:GetChildren()) do
+                if item:IsA("Tool") and (string.find(item.Name, "Fruit") or string.find(item.Name, "DF")) then
+                    fruit = string.gsub(item.Name, " Fruit", "")
+                    break
+                end
+            end
+        end
+    end
+    return lvl, bnt, fruit
+end
+
+local function UpdatePlayerTracker()
+    for _, child in pairs(TrackerScroll:GetChildren()) do
+        if child:IsA("TextButton") then child:Destroy() end
+    end
+
+    local myChar = LocalPlayer.Character
+    local myPos = (myChar and myChar:FindFirstChild("HumanoidRootPart")) and myChar.HumanoidRootPart.Position or Vector3.zero
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            local lvl, bnt, fruit = GetAdvancedPlayerStats(plr)
+            local distStr = "?"
+            local pChar = plr.Character
+            
+            if pChar and pChar:FindFirstChild("HumanoidRootPart") and myPos ~= Vector3.zero then
+                local dist = math.floor((pChar.HumanoidRootPart.Position - myPos).Magnitude)
+                distStr = tostring(dist) .. "m"
+            end
+
+            local pBtn = Instance.new("TextButton", TrackerScroll)
+            pBtn.Size = UDim2.new(1, -2, 0, 24)
+            pBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+            pBtn.TextColor3 = Color3.fromRGB(220, 220, 220)
+            pBtn.Font = Enum.Font.Gotham
+            pBtn.TextSize = 8
+            pBtn.TextXAlignment = Enum.TextXAlignment.Left
+            pBtn.Text = string.format(" %s\n Lvl:%s | Bnt:%s | DF:%s | %s", plr.DisplayName or plr.Name, lvl, bnt, fruit, distStr)
+
+            local pCorner = Instance.new("UICorner", pBtn)
+            pCorner.CornerRadius = UDim.new(0, 4)
+
+            pBtn.MouseButton1Click:Connect(function()
+                if plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") and myChar and myChar:FindFirstChild("HumanoidRootPart") then
+                    myChar:PivotTo(CFrame.new(plr.Character.HumanoidRootPart.Position + Vector3.new(0, 3, 0)))
+                    sendNotification("Teleport", "TP ke " .. plr.Name, 2)
+                end
+            end)
+        end
+    end
+end
+
+-- Loop Pemindaian Terpisah
+task.spawn(function()
+    while getgenv().AutoFarmingRunning do
+        pcall(ScanFruits)
+        task.wait(3)
+    end
+end)
+
+task.spawn(function()
+    while getgenv().AutoFarmingRunning do
+        pcall(UpdatePlayerTracker)
+        task.wait(5)
+    end
+end)
