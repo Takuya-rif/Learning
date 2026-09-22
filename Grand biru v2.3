@@ -1,19 +1,30 @@
--- Refined Script with Cursed Fruit Tracker/ESP
+-- Refined & Compact Auto Farm Script Grand Blue v2.2 (Full Restored & Optimized)
 local CoreGui = game:GetService("CoreGui")
 local StarterGui = game:GetService("StarterGui")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local GuiService = game:GetService("GuiService")
+local UserInputService = game:GetService("UserInputService")
+local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local Camera = workspace.CurrentCamera
 local DiscordLink = "https://discord.gg/vfmjNqSwWM"
 
 local function sendNotification(title, text, duration)
     pcall(function()
         StarterGui:SetCore("SendNotification", {Title = title, Text = text, Duration = duration or 2})
     end)
+end
+
+local function safeSendWebhook(msg)
+    if typeof(SendWebhook) == "function" then
+        pcall(function() SendWebhook(msg) end)
+    end
 end
 
 local ConfigFolder = "AutoFarmConfig"
@@ -29,26 +40,440 @@ local function LoadConfig()
     return DefaultSettings
 end
 
+local function SaveConfig()
+    if writefile then
+        local dataToSave = { AntiAdmin = getgenv().AntiAdminEnabled }
+        pcall(function()
+            if not isfolder(ConfigFolder) then makefolder(ConfigFolder) end
+            writefile(ConfigFile, HttpService:JSONEncode(dataToSave))
+        end)
+    end
+end
+
 local CurrentConfig = LoadConfig()
+local LAG_OFFSET = 0.04
+local FALLBACK_TARGET = 0.55
+local MINING_DISTANCE = 12
 local SAFE_ZONE_POS = Vector3.new(15000, 50000, 15000)
 local FISH_ZONE_CFRAME = CFrame.new(-344, -1, -971)
+
+getgenv().AutoFarmingRunning = false
+task.wait(0.2)
+
+if getgenv().NoclipConnection then getgenv().NoclipConnection:Disconnect() getgenv().NoclipConnection = nil end
+if getgenv().AntiAdminConnection then getgenv().AntiAdminConnection:Disconnect() getgenv().AntiAdminConnection = nil end
 
 getgenv().AutoFarmingRunning = true
 getgenv().AutoMineEnabled = false
 getgenv().AutoFishEnabled = false
-getgenv().FruitESPEnabled = true
+getgenv().AntiAdminEnabled = CurrentConfig.AntiAdmin
+getgenv().TargetZone = "Todos"
+
+local UIToggles = {}
+
+local function CreateSkyBase()
+    local baseName = "CustomAutoFarmBase_Sky"
+    if workspace:FindFirstChild(baseName) then workspace[baseName]:Destroy() end
+    local base = Instance.new("Part")
+    base.Name = baseName
+    base.Size = Vector3.new(150, 5, 150)
+    base.Position = SAFE_ZONE_POS - Vector3.new(0, 5, 0)
+    base.Anchored = true
+    base.CanCollide = true
+    base.Transparency = 0.7
+    base.Color = Color3.fromRGB(0, 255, 100)
+    base.Material = Enum.Material.Neon
+    base.Parent = workspace
+end
+CreateSkyBase()
 
 local uiName = "Custom_Base_UI"
-if CoreGui:FindFirstChild(uiName) then CoreGui[uiName]:Destroy() end
+if CoreGui:FindFirstChild(uiName) then
+    CoreGui[uiName]:Destroy()
+    task.wait(0.2)
+end
+
+-- HELPER CRAFTING BYPASS
+local function triggerPromptByKeyword(keywords)
+    local triggered = false
+    for _, prompt in ipairs(workspace:GetDescendants()) do
+        if prompt:IsA("ProximityPrompt") then
+            local pName = string.lower(prompt.Name)
+            local pParent = string.lower(prompt.Parent and prompt.Parent.Name or "")
+            local pAction = string.lower(prompt.ActionText or "")
+            local pObject = string.lower(prompt.ObjectText or "")
+            
+            for _, key in ipairs(keywords) do
+                if string.find(pName, key) or string.find(pParent, key) 
+                   or string.find(pAction, key) or string.find(pObject, key) then
+                    prompt.RequiresLineOfSight = false
+                    prompt.MaxActivationDistance = 999999
+                    pcall(function()
+                        fireproximityprompt(prompt)
+                        triggered = true
+                    end)
+                    break
+                end
+            end
+        end
+    end
+    return triggered
+end
+
+local function forceOpenUIByKeyword(keywords)
+    local opened = false
+    for _, gui in ipairs(PlayerGui:GetChildren()) do
+        if gui:IsA("ScreenGui") then
+            local gName = string.lower(gui.Name)
+            for _, key in ipairs(keywords) do
+                if string.find(gName, key) then
+                    gui.Enabled = true
+                    for _, frame in ipairs(gui:GetDescendants()) do
+                        if frame:IsA("Frame") or frame:IsA("CanvasGroup") then
+                            frame.Visible = true
+                        end
+                    end
+                    opened = true
+                    break
+                end
+            end
+        end
+    end
+    return opened
+end
+
+local function forceCloseRefineUI()
+    local refKeywords = {"refine", "anvil"}
+    for _, gui in ipairs(PlayerGui:GetChildren()) do
+        if gui:IsA("ScreenGui") then
+            local gName = string.lower(gui.Name)
+            for _, key in ipairs(refKeywords) do
+                if string.find(gName, key) then
+                    gui.Enabled = false
+                    for _, frame in ipairs(gui:GetDescendants()) do
+                        if frame:IsA("Frame") or frame:IsA("CanvasGroup") then
+                            frame.Visible = false
+                        end
+                    end
+                    break
+                end
+            end
+        end
+    end
+end
+
+local GROUP_ID = 34564085
+local isHopping = false
+
+local function ServerHop()
+    if isHopping then return end
+    isHopping = true
+    task.spawn(function()
+        pcall(function()
+            local events = ReplicatedStorage:FindFirstChild("Events")
+            if events and events:FindFirstChild("GetSettings") then
+                events.GetSettings:InvokeServer()
+            end
+        end)
+        task.wait(0.5)
+        
+        local clickedQuickJoin = false
+        pcall(function()
+            local serversGui = PlayerGui:FindFirstChild("Servers")
+            if serversGui and serversGui:FindFirstChild("Frame") then
+                local quickJoinBtn = serversGui.Frame:FindFirstChild("QuickJoin")
+                if quickJoinBtn then
+                    if getconnections then
+                        for _, conn in pairs(getconnections(quickJoinBtn.MouseButton1Click)) do conn:Fire() end
+                        for _, conn in pairs(getconnections(quickJoinBtn.Activated)) do conn:Fire() end
+                    end
+                    if firesignal then
+                        firesignal(quickJoinBtn.MouseButton1Click)
+                        firesignal(quickJoinBtn.Activated)
+                    end
+                    clickedQuickJoin = true
+                end
+            end
+        end)
+        
+        if clickedQuickJoin then task.wait(5) end
+
+        local serversApi = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
+        local req = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+        if req then
+            local success, response = pcall(function() return req({Url = serversApi, Method = "GET"}) end)
+            if success and response.StatusCode == 200 then
+                local data = HttpService:JSONDecode(response.Body)
+                if data and data.data then
+                    for _, server in ipairs(data.data) do
+                        if server.playing < server.maxPlayers and server.id ~= game.JobId then
+                            TeleportService:TeleportToPlaceInstance(game.PlaceId, server.id, LocalPlayer)
+                            task.wait(5)
+                            return
+                        end
+                    end
+                end
+            end
+        end
+        TeleportService:Teleport(game.PlaceId, LocalPlayer)
+    end)
+end
+
+local function CheckPlayerForAdmin(player)
+    if player == LocalPlayer then return end
+    task.spawn(function()
+        local success, rank = pcall(function() return player:GetRankInGroup(GROUP_ID) end)
+        if success and rank and rank > 1 then
+            if getgenv().AntiAdminEnabled then
+                local msg = "**Admin Detected**: `" .. player.Name .. "`\nIniciando Server Hop..."
+                sendNotification("Anti-Admin", "Admin: " .. player.Name .. "\nServer Hopping...", 5)
+                safeSendWebhook(msg)
+                ServerHop()
+            end
+        end
+    end)
+end
+
+local MouseController = {
+    IsDown = false,
+    Set = function(self, state, force)
+        if self.IsDown ~= state or force then
+            local cx = Camera.ViewportSize.X / 2
+            local cy = Camera.ViewportSize.Y / 2
+            VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, state, game, 0)
+            self.IsDown = state
+        end
+    end
+}
+
+local LastTransparentOre = nil
+local function HandleOreTransparency(currentOre)
+    if LastTransparentOre ~= currentOre then
+        if LastTransparentOre and LastTransparentOre.Parent then
+            for _, part in ipairs(LastTransparentOre:GetDescendants()) do
+                if part:IsA("BasePart") then part.LocalTransparencyModifier = 0 end
+            end
+            if LastTransparentOre:IsA("BasePart") then LastTransparentOre.LocalTransparencyModifier = 0 end
+        end
+        LastTransparentOre = currentOre
+        if currentOre then
+            for _, part in ipairs(currentOre:GetDescendants()) do
+                if part:IsA("BasePart") then part.LocalTransparencyModifier = 0.85 end
+            end
+            if currentOre:IsA("BasePart") then currentOre.LocalTransparencyModifier = 0.85 end
+        end
+    end
+end
+
+local function getQTEMiningFrames()
+    local char = LocalPlayer.Character
+    if char and char:FindFirstChild("HumanoidRootPart") then
+        local miningGui = char.HumanoidRootPart:FindFirstChild("Mining")
+        if miningGui and miningGui:IsA("BillboardGui") then
+            local uiFrame = miningGui:FindFirstChild("Frame")
+            if uiFrame and uiFrame.Visible then
+                local amount = uiFrame:FindFirstChild("Amount")
+                if amount and miningGui.Enabled then return amount, uiFrame end
+            end
+        end
+    end
+    
+    local qte = PlayerGui:FindFirstChild("QuickTimeEvents")
+    if qte then
+        local events = qte:FindFirstChild("QTEClient") and qte.QTEClient:FindFirstChild("Events")
+        if events then
+            local miningEvent = events:FindFirstChild("Mining")
+            if miningEvent then
+                local miningInner = miningEvent:FindFirstChild("Mining")
+                if miningInner and miningInner.Enabled then
+                    local uiFrame = miningInner:FindFirstChild("Frame")
+                    if uiFrame and uiFrame.Visible and uiFrame:FindFirstChild("Amount") then
+                        return uiFrame.Amount, uiFrame
+                    end
+                end
+            end
+        end
+    end
+    return nil, nil
+end
+
+local function getTargetOresList()
+    local safeOres = {}
+    local islands = workspace:FindFirstChild("Islands")
+    local selectedZone = getgenv().TargetZone or "Todos"
+    if not islands then return safeOres end
+    
+    local function scanIslandForOres(islandName)
+        local islandFolder = islands:FindFirstChild(islandName)
+        if islandFolder and islandFolder:FindFirstChild("Island") then
+            for _, obj in pairs(islandFolder.Island:GetChildren()) do
+                if string.match(obj.Name, "^OreBlock") and obj:GetAttribute("Mined") ~= true then
+                    table.insert(safeOres, obj)
+                end
+            end
+        end
+    end
+
+    if selectedZone == "Todos" or selectedZone == "Anchor Town" then scanIslandForOres("Anchor Town") end
+    if selectedZone == "Todos" or selectedZone == "Maple Village" then scanIslandForOres("Maple Village") end
+    if selectedZone == "Todos" or selectedZone == "Clown Town" then scanIslandForOres("Clown Town") end
+    return safeOres
+end
+
+local function findNearestOre()
+    local nearestOre, shortestDistance = nil, math.huge
+    local char = LocalPlayer.Character
+    if char and char:FindFirstChild("HumanoidRootPart") then
+        local myPos = char.HumanoidRootPart.Position
+        for _, obj in pairs(getTargetOresList()) do
+            local orePos = nil
+            if obj:IsA("Model") and obj.PrimaryPart then
+                orePos = obj.PrimaryPart.Position
+            elseif obj:IsA("BasePart") then
+                orePos = obj.Position
+            else
+                local part = obj:FindFirstChildWhichIsA("BasePart")
+                if part then orePos = part.Position end
+            end
+            if orePos then
+                local distance = (orePos - myPos).Magnitude
+                if distance < shortestDistance then
+                    shortestDistance = distance
+                    nearestOre = obj
+                end
+            end
+        end
+    end
+    return nearestOre, shortestDistance
+end
+
+local function getFishingCastFrames()
+    local qte = PlayerGui:FindFirstChild("QuickTimeEvents")
+    if qte then
+        local qteClient = qte:FindFirstChild("QTEClient")
+        if qteClient then
+            local events = qteClient:FindFirstChild("Events")
+            if events then
+                local timedRelease = events:FindFirstChild("Timed Release")
+                if timedRelease then
+                    local fishingBar = timedRelease:FindFirstChild("Fishing Bar")
+                    if fishingBar then
+                        local success, isEnabled = pcall(function() return fishingBar.Enabled end)
+                        if success and isEnabled then
+                            local uiFrame = fishingBar:FindFirstChild("Frame")
+                            if uiFrame and uiFrame.Visible then
+                                local amount = uiFrame:FindFirstChild("Amount")
+                                if amount then return amount, uiFrame end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return nil, nil
+end
+
+local function CalculateRelease(amountBar, parentFrame)
+    if parentFrame.AbsoluteSize.X > 5 and parentFrame.AbsoluteSize.Y > 5 then
+        local isHorizontal = parentFrame.AbsoluteSize.X > parentFrame.AbsoluteSize.Y
+        local targetZone = nil
+        for _, child in ipairs(parentFrame:GetChildren()) do
+            if (child:IsA("Frame") or child:IsA("ImageLabel")) and child.Name ~= "Amount" and child.Name ~= "Background" and child.Name ~= "UIStroke" and child.Name ~= "UICorner" then
+                if child:IsA("Frame") and child.BackgroundColor3.G > 0.4 and child.BackgroundColor3.R < 0.6 then
+                    targetZone = child
+                    break
+                elseif not targetZone then
+                    targetZone = child
+                end
+            end
+        end
+        local requiredFill = FALLBACK_TARGET
+        if targetZone then
+            if isHorizontal then
+                local parentWidth = parentFrame.AbsoluteSize.X
+                local targetHitX = targetZone.AbsolutePosition.X + (targetZone.AbsoluteSize.X * 0.2)
+                local parentLeft = parentFrame.AbsolutePosition.X
+                requiredFill = (targetHitX - parentLeft) / parentWidth
+            else
+                local parentHeight = parentFrame.AbsoluteSize.Y
+                local targetHitY = targetZone.AbsolutePosition.Y + (targetZone.AbsoluteSize.Y * 0.8)
+                local parentBottom = parentFrame.AbsolutePosition.Y + parentFrame.AbsoluteSize.Y
+                requiredFill = (parentBottom - targetHitY) / parentHeight
+            end
+        end
+        local currentFill = isHorizontal and (amountBar.AbsoluteSize.X / parentFrame.AbsoluteSize.X) or (amountBar.AbsoluteSize.Y / parentFrame.AbsoluteSize.Y)
+        if currentFill >= (requiredFill - LAG_OFFSET) then
+            return true
+        end
+    end
+    return false
+end
+
+local function performCleanup()
+    getgenv().AutoFarmingRunning = false
+    getgenv().AutoMineEnabled = false
+    getgenv().AutoFishEnabled = false
+    getgenv().AntiAdminEnabled = false
+    
+    if getgenv().NoclipConnection then getgenv().NoclipConnection:Disconnect() getgenv().NoclipConnection = nil end
+    if getgenv().AntiAdminConnection then getgenv().AntiAdminConnection:Disconnect() getgenv().AntiAdminConnection = nil end
+    
+    MouseController:Set(false, true)
+    LocalPlayer.DevCameraOcclusionMode = Enum.DevCameraOcclusionMode.Zoom
+    HandleOreTransparency(nil)
+    
+    if workspace:FindFirstChild("CustomAutoFarmBase_Sky") then
+        workspace.CustomAutoFarmBase_Sky:Destroy()
+    end
+    
+    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+        local float = LocalPlayer.Character.HumanoidRootPart:FindFirstChild("AutoFarmFloat")
+        if float then float:Destroy() end
+        for _, part in pairs(LocalPlayer.Character:GetDescendants()) do
+            if part:IsA("BasePart") then part.CanCollide = true end
+        end
+    end
+end
+
+local function MakeDraggable(dragHandle, targetObject)
+    local dragging, dragInput, dragStart, startPos
+    dragHandle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = targetObject.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    dragHandle.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            dragInput = input
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then
+            local delta = input.Position - dragStart
+            targetObject.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+end
 
 local ScreenGui = Instance.new("ScreenGui", (gethui and gethui()) or CoreGui or PlayerGui)
 ScreenGui.Name = uiName
+ScreenGui.AncestryChanged:Connect(function(_, parent)
+    if not parent then performCleanup() end
+end)
 
+-- MAIN FRAME
 local Main = Instance.new("Frame", ScreenGui)
-Main.Size = UDim2.new(0, 230, 0, 360)
-Main.Position = UDim2.new(0.5, -115, 0.5, -180)
+Main.Size = UDim2.new(0, 220, 0, 340)
+Main.Position = UDim2.new(0.5, -110, 0.5, -170)
 Main.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
 Main.BorderSizePixel = 0
+Main.Active = true
 
 local MainCorner = Instance.new("UICorner", Main)
 MainCorner.CornerRadius = UDim.new(0, 8)
@@ -60,6 +485,11 @@ Title.TextColor3 = Color3.fromRGB(240, 240, 240)
 Title.Font = Enum.Font.GothamBold
 Title.TextSize = 11
 Title.Text = "  GrandBlue Hub v2.2"
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Active = true
+
+local TitleCorner = Instance.new("UICorner", Title)
+TitleCorner.CornerRadius = UDim.new(0, 8)
 
 local CloseBtn = Instance.new("TextButton", Main)
 CloseBtn.Size = UDim2.new(0, 25, 0, 28)
@@ -67,243 +497,6 @@ CloseBtn.Position = UDim2.new(1, -25, 0, 0)
 CloseBtn.BackgroundTransparency = 1
 CloseBtn.TextColor3 = Color3.fromRGB(220, 60, 60)
 CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextSize = 13
 CloseBtn.Text = "✕"
-CloseBtn.MouseButton1Click:Connect(function() ScreenGui:Destroy() end)
-
-local Scroll = Instance.new("ScrollingFrame", Main)
-Scroll.Size = UDim2.new(1, -10, 1, -36)
-Scroll.Position = UDim2.new(0, 5, 0, 30)
-Scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-Scroll.BackgroundTransparency = 1
-Scroll.ScrollBarThickness = 2
-
-local Layout = Instance.new("UIListLayout", Scroll)
-Layout.Padding = UDim.new(0, 4)
-
-local uiOrder = 0
-local function addSeparator(text)
-    local sep = Instance.new("TextLabel", Scroll)
-    sep.Size = UDim2.new(1, 0, 0, 16)
-    sep.BackgroundTransparency = 1
-    sep.TextColor3 = Color3.fromRGB(130, 130, 140)
-    sep.Font = Enum.Font.GothamBold
-    sep.TextSize = 9
-    sep.Text = "— " .. string.upper(text) .. " —"
-    sep.LayoutOrder = uiOrder
-    uiOrder = uiOrder + 1
-end
-
-local function createTPButton(name, color, cframePos)
-    local btn = Instance.new("TextButton", Scroll)
-    btn.Size = UDim2.new(1, 0, 0, 24)
-    btn.Text = "TP " .. name
-    btn.BackgroundColor3 = color
-    btn.TextColor3 = Color3.fromRGB(240, 240, 240)
-    btn.Font = Enum.Font.GothamSemibold
-    btn.TextSize = 10
-    btn.LayoutOrder = uiOrder
-    uiOrder = uiOrder + 1
-    
-    local corner = Instance.new("UICorner", btn)
-    corner.CornerRadius = UDim.new(0, 5)
-    
-    btn.MouseButton1Click:Connect(function()
-        if LocalPlayer.Character then LocalPlayer.Character:PivotTo(cframePos) end
-    end)
-end
-
--- ==================== 1. TELEPORT MENU ====================
-addSeparator("Teleports")
-createTPButton("Safe Zone", Color3.fromRGB(35, 90, 150), CFrame.new(SAFE_ZONE_POS))
-createTPButton("Blacksmith", Color3.fromRGB(150, 75, 35), CFrame.new(-201, 136, 554))
-createTPButton("Anchor Town", Color3.fromRGB(40, 110, 110), CFrame.new(246, 22, 308))
-createTPButton("Clown Town", Color3.fromRGB(40, 110, 110), CFrame.new(2668, 69, 417))
-
--- ==================== 2. CURSED FRUIT TRACKER ====================
-addSeparator("Fruit Tracker & ESP")
-
-local FruitContainer = Instance.new("Frame", Scroll)
-FruitContainer.Size = UDim2.new(1, 0, 0, 70)
-FruitContainer.BackgroundColor3 = Color3.fromRGB(15, 15, 18)
-FruitContainer.LayoutOrder = uiOrder
-uiOrder = uiOrder + 1
-
-local FruitScroll = Instance.new("ScrollingFrame", FruitContainer)
-FruitScroll.Size = UDim2.new(1, -4, 1, -4)
-FruitScroll.Position = UDim2.new(0, 2, 0, 2)
-FruitScroll.BackgroundTransparency = 1
-FruitScroll.ScrollBarThickness = 2
-FruitScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-
-local FruitLayout = Instance.new("UIListLayout", FruitScroll)
-FruitLayout.Padding = UDim.new(0, 3)
-
-local function ScanFruits()
-    for _, child in pairs(FruitScroll:GetChildren()) do
-        if child:IsA("TextButton") then child:Destroy() end
-    end
-
-    local myChar = LocalPlayer.Character
-    local myPos = (myChar and myChar:FindFirstChild("HumanoidRootPart")) and myChar.HumanoidRootPart.Position or Vector3.zero
-    local found = false
-
-    for _, obj in ipairs(workspace:GetChildren()) do
-        local name = obj.Name
-        if string.find(name, "Fruit") or string.find(name, "Cursed") or obj:FindFirstChild("Handle") then
-            local pos = obj:IsA("Model") and (obj.PrimaryPart and obj.PrimaryPart.Position or obj:GetPivot().Position) or (obj:IsA("BasePart") and obj.Position)
-            
-            if pos then
-                found = true
-                local dist = myPos ~= Vector3.zero and math.floor((pos - myPos).Magnitude) or 0
-                
-                -- Highlight / ESP Effect
-                if getgenv().FruitESPEnabled and not obj:FindFirstChild("FruitESP") then
-                    local hl = Instance.new("Highlight")
-                    hl.Name = "FruitESP"
-                    hl.FillColor = Color3.fromRGB(255, 0, 120)
-                    hl.OutlineColor = Color3.fromRGB(255, 255, 255)
-                    hl.Parent = obj
-                end
-
-                local btn = Instance.new("TextButton", FruitScroll)
-                btn.Size = UDim2.new(1, -2, 0, 20)
-                btn.BackgroundColor3 = Color3.fromRGB(120, 30, 80)
-                btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-                btn.Font = Enum.Font.GothamBold
-                btn.TextSize = 9
-                btn.Text = string.format(" 🍎 %s (%dm)", name, dist)
-                btn.TextXAlignment = Enum.TextXAlignment.Left
-
-                local corner = Instance.new("UICorner", btn)
-                corner.CornerRadius = UDim.new(0, 4)
-
-                btn.MouseButton1Click:Connect(function()
-                    if myChar then
-                        myChar:PivotTo(CFrame.new(pos + Vector3.new(0, 3, 0)))
-                        sendNotification("Fruit TP", "Teleport ke " .. name, 2)
-                    end
-                end)
-            end
-        end
-    end
-
-    if not found then
-        local lbl = Instance.new("TextButton", FruitScroll)
-        lbl.Size = UDim2.new(1, -2, 0, 20)
-        lbl.BackgroundTransparency = 1
-        lbl.TextColor3 = Color3.fromRGB(120, 120, 130)
-        lbl.Font = Enum.Font.Gotham
-        lbl.TextSize = 9
-        lbl.Text = " Tidak ada buah di sekitar"
-    end
-end
-
--- ==================== 3. PLAYER TRACKER ====================
-addSeparator("Player Tracker")
-
-local TrackerContainer = Instance.new("Frame", Scroll)
-TrackerContainer.Size = UDim2.new(1, 0, 0, 90)
-TrackerContainer.BackgroundColor3 = Color3.fromRGB(15, 15, 18)
-TrackerContainer.LayoutOrder = uiOrder
-uiOrder = uiOrder + 1
-
-local TrackerScroll = Instance.new("ScrollingFrame", TrackerContainer)
-TrackerScroll.Size = UDim2.new(1, -4, 1, -4)
-TrackerScroll.Position = UDim2.new(0, 2, 0, 2)
-TrackerScroll.BackgroundTransparency = 1
-TrackerScroll.ScrollBarThickness = 2
-TrackerScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-
-local TrackerLayout = Instance.new("UIListLayout", TrackerScroll)
-TrackerLayout.Padding = UDim.new(0, 3)
-
-local function GetAdvancedPlayerStats(plr)
-    local lvl, bnt, fruit = "N/A", "N/A", "None"
-    if plr:GetAttribute("Level") then lvl = tostring(plr:GetAttribute("Level")) end
-    if plr:GetAttribute("Bounty") or plr:GetAttribute("Belly") then 
-        bnt = tostring(plr:GetAttribute("Bounty") or plr:GetAttribute("Belly")) 
-    end
-
-    local targets = {plr:FindFirstChild("leaderstats"), plr:FindFirstChild("Data"), plr:FindFirstChild("Stats")}
-    for _, folder in ipairs(targets) do
-        if folder then
-            for _, val in ipairs(folder:GetChildren()) do
-                local name = string.lower(val.Name)
-                if string.find(name, "level") or string.find(name, "lvl") then lvl = tostring(val.Value) end
-                if string.find(name, "bounty") or string.find(name, "belly") or string.find(name, "berries") then bnt = tostring(val.Value) end
-                if string.find(name, "fruit") then fruit = tostring(val.Value) end
-            end
-        end
-    end
-
-    if fruit == "None" then
-        local searchContainers = {}
-        if plr.Character then table.insert(searchContainers, plr.Character) end
-        if plr:FindFirstChild("Backpack") then table.insert(searchContainers, plr.Backpack) end
-        for _, container in ipairs(searchContainers) do
-            for _, item in ipairs(container:GetChildren()) do
-                if item:IsA("Tool") and (string.find(item.Name, "Fruit") or string.find(item.Name, "DF")) then
-                    fruit = string.gsub(item.Name, " Fruit", "")
-                    break
-                end
-            end
-        end
-    end
-    return lvl, bnt, fruit
-end
-
-local function UpdatePlayerTracker()
-    for _, child in pairs(TrackerScroll:GetChildren()) do
-        if child:IsA("TextButton") then child:Destroy() end
-    end
-
-    local myChar = LocalPlayer.Character
-    local myPos = (myChar and myChar:FindFirstChild("HumanoidRootPart")) and myChar.HumanoidRootPart.Position or Vector3.zero
-
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer then
-            local lvl, bnt, fruit = GetAdvancedPlayerStats(plr)
-            local distStr = "?"
-            local pChar = plr.Character
-            
-            if pChar and pChar:FindFirstChild("HumanoidRootPart") and myPos ~= Vector3.zero then
-                local dist = math.floor((pChar.HumanoidRootPart.Position - myPos).Magnitude)
-                distStr = tostring(dist) .. "m"
-            end
-
-            local pBtn = Instance.new("TextButton", TrackerScroll)
-            pBtn.Size = UDim2.new(1, -2, 0, 24)
-            pBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
-            pBtn.TextColor3 = Color3.fromRGB(220, 220, 220)
-            pBtn.Font = Enum.Font.Gotham
-            pBtn.TextSize = 8
-            pBtn.TextXAlignment = Enum.TextXAlignment.Left
-            pBtn.Text = string.format(" %s\n Lvl:%s | Bnt:%s | DF:%s | %s", plr.DisplayName or plr.Name, lvl, bnt, fruit, distStr)
-
-            local pCorner = Instance.new("UICorner", pBtn)
-            pCorner.CornerRadius = UDim.new(0, 4)
-
-            pBtn.MouseButton1Click:Connect(function()
-                if plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") and myChar and myChar:FindFirstChild("HumanoidRootPart") then
-                    myChar:PivotTo(CFrame.new(plr.Character.HumanoidRootPart.Position + Vector3.new(0, 3, 0)))
-                    sendNotification("Teleport", "TP ke " .. plr.Name, 2)
-                end
-            end)
-        end
-    end
-end
-
--- Loop Pemindaian Terpisah
-task.spawn(function()
-    while getgenv().AutoFarmingRunning do
-        pcall(ScanFruits)
-        task.wait(3)
-    end
-end)
-
-task.spawn(function()
-    while getgenv().AutoFarmingRunning do
-        pcall(UpdatePlayerTracker)
-        task.wait(5)
-    end
-end)
+CloseBtn.MouseButton1Click:Connect(function() ScreenGui:Destroy()
