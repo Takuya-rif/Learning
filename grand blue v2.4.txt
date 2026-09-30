@@ -1,0 +1,1068 @@
+-- GrandBlue Hub v2.3 (Full Restored & Fully Integrated Script)
+local CoreGui = game:GetService("CoreGui")
+local StarterGui = game:GetService("StarterGui")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local GuiService = game:GetService("GuiService")
+local UserInputService = game:GetService("UserInputService")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local Camera = workspace.CurrentCamera
+local InputEvent = ReplicatedStorage:WaitForChild("Events"):WaitForChild("Input")
+local DiscordLink = "https://discord.gg/vfmjNqSwWM"
+
+-- ==========================================
+-- NOTIFICATION & WEBHOOK HELPERS
+-- ==========================================
+local function sendNotification(title, text, duration)
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {Title = title, Text = text, Duration = duration or 2})
+    end)
+end
+
+local function safeSendWebhook(msg)
+    if typeof(SendWebhook) == "function" then
+        pcall(function() SendWebhook(msg) end)
+    end
+end
+
+-- ==========================================
+-- CONFIGURATION SYSTEM
+-- ==========================================
+local ConfigFolder = "AutoFarmConfig"
+local ConfigFile = ConfigFolder .. "/Settings.json"
+local DefaultSettings = { AntiAdmin = true }
+
+local function LoadConfig()
+    if isfolder and not isfolder(ConfigFolder) then pcall(function() makefolder(ConfigFolder) end) end
+    if isfile and isfile(ConfigFile) then
+        local success, result = pcall(function() return HttpService:JSONDecode(readfile(ConfigFile)) end)
+        if success and result then return result end
+    end
+    return DefaultSettings
+end
+
+local function SaveConfig()
+    if writefile then
+        local dataToSave = { AntiAdmin = getgenv().AntiAdminEnabled }
+        pcall(function()
+            if not isfolder(ConfigFolder) then makefolder(ConfigFolder) end
+            writefile(ConfigFile, HttpService:JSONEncode(dataToSave))
+        end)
+    end
+end
+
+local CurrentConfig = LoadConfig()
+local LAG_OFFSET = 0.04
+local FALLBACK_TARGET = 0.55
+local MINING_DISTANCE = 12
+local SAFE_ZONE_POS = Vector3.new(15000, 50000, 15000)
+local FISH_ZONE_POS = Vector3.new(4464, 50, -3603)
+local FISH_ZONE_CFRAME = CFrame.new(FISH_ZONE_POS)
+
+-- Clean up existing connections
+getgenv().AutoFarmingRunning = false
+task.wait(0.2)
+
+if getgenv().NoclipConnection then getgenv().NoclipConnection:Disconnect() getgenv().NoclipConnection = nil end
+if getgenv().AntiAdminConnection then getgenv().AntiAdminConnection:Disconnect() getgenv().AntiAdminConnection = nil end
+if getgenv().ReelTrackingConnection then getgenv().ReelTrackingConnection:Disconnect() getgenv().ReelTrackingConnection = nil end
+
+getgenv().AutoFarmingRunning = true
+getgenv().AutoMineEnabled = false
+getgenv().AutoFishEnabled = false
+getgenv().AutoDefendEnabled = true
+getgenv().PlayerESPEnabled = true
+getgenv().TracersEnabled = true
+getgenv().AntiAdminEnabled = CurrentConfig.AntiAdmin
+getgenv().TargetZone = "Todos"
+
+-- ==========================================
+-- SKYBASE CREATION
+-- ==========================================
+local function CreateSkyBase()
+    local baseName = "CustomAutoFarmBase_Sky"
+    if workspace:FindFirstChild(baseName) then workspace[baseName]:Destroy() end
+    local base = Instance.new("Part")
+    base.Name = baseName
+    base.Size = Vector3.new(150, 5, 150)
+    base.Position = SAFE_ZONE_POS - Vector3.new(0, 5, 0)
+    base.Anchored = true
+    base.CanCollide = true
+    base.Transparency = 0.7
+    base.Color = Color3.fromRGB(0, 255, 100)
+    base.Material = Enum.Material.Neon
+    base.Parent = workspace
+end
+CreateSkyBase()
+
+local uiName = "Custom_Base_UI"
+if CoreGui:FindFirstChild(uiName) then
+    CoreGui[uiName]:Destroy()
+    task.wait(0.2)
+end
+
+-- ==========================================
+-- CRAFTING & REFINE BYPASS HELPERS
+-- ==========================================
+local function triggerPromptByKeyword(keywords)
+    local triggered = false
+    for _, prompt in ipairs(workspace:GetDescendants()) do
+        if prompt:IsA("ProximityPrompt") then
+            local pName = string.lower(prompt.Name)
+            local pParent = string.lower(prompt.Parent and prompt.Parent.Name or "")
+            local pAction = string.lower(prompt.ActionText or "")
+            local pObject = string.lower(prompt.ObjectText or "")
+            
+            for _, key in ipairs(keywords) do
+                if string.find(pName, key) or string.find(pParent, key) 
+                   or string.find(pAction, key) or string.find(pObject, key) then
+                    prompt.RequiresLineOfSight = false
+                    prompt.MaxActivationDistance = 999999
+                    pcall(function()
+                        fireproximityprompt(prompt)
+                        triggered = true
+                    end)
+                    break
+                end
+            end
+        end
+    end
+    return triggered
+end
+
+local function forceOpenUIByKeyword(keywords)
+    local opened = false
+    for _, gui in ipairs(PlayerGui:GetChildren()) do
+        if gui:IsA("ScreenGui") then
+            local gName = string.lower(gui.Name)
+            for _, key in ipairs(keywords) do
+                if string.find(gName, key) then
+                    gui.Enabled = true
+                    for _, frame in ipairs(gui:GetDescendants()) do
+                        if frame:IsA("Frame") or frame:IsA("CanvasGroup") then
+                            frame.Visible = true
+                        end
+                    end
+                    opened = true
+                    break
+                end
+            end
+        end
+    end
+    return opened
+end
+
+local function forceCloseRefineUI()
+    local refKeywords = {"refine", "anvil"}
+    for _, gui in ipairs(PlayerGui:GetChildren()) do
+        if gui:IsA("ScreenGui") then
+            local gName = string.lower(gui.Name)
+            for _, key in ipairs(refKeywords) do
+                if string.find(gName, key) then
+                    gui.Enabled = false
+                    for _, frame in ipairs(gui:GetDescendants()) do
+                        if frame:IsA("Frame") or frame:IsA("CanvasGroup") then
+                            frame.Visible = false
+                        end
+                    end
+                    break
+                end
+            end
+        end
+    end
+end
+
+-- ==========================================
+-- SERVER HOP & ANTI ADMIN
+-- ==========================================
+local GROUP_ID = 34564085
+local isHopping = false
+
+local function ServerHop()
+    if isHopping then return end
+    isHopping = true
+    task.spawn(function()
+        pcall(function()
+            local events = ReplicatedStorage:FindFirstChild("Events")
+            if events and events:FindFirstChild("GetSettings") then
+                events.GetSettings:InvokeServer()
+            end
+        end)
+        task.wait(0.5)
+        
+        local clickedQuickJoin = false
+        pcall(function()
+            local serversGui = PlayerGui:FindFirstChild("Servers")
+            if serversGui and serversGui:FindFirstChild("Frame") then
+                local quickJoinBtn = serversGui.Frame:FindFirstChild("QuickJoin")
+                if quickJoinBtn then
+                    if getconnections then
+                        for _, conn in pairs(getconnections(quickJoinBtn.MouseButton1Click)) do conn:Fire() end
+                        for _, conn in pairs(getconnections(quickJoinBtn.Activated)) do conn:Fire() end
+                    end
+                    if firesignal then
+                        firesignal(quickJoinBtn.MouseButton1Click)
+                        firesignal(quickJoinBtn.Activated)
+                    end
+                    clickedQuickJoin = true
+                end
+            end
+        end)
+        
+        if clickedQuickJoin then task.wait(5) end
+
+        local serversApi = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
+        local req = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+        if req then
+            local success, response = pcall(function() return req({Url = serversApi, Method = "GET"}) end)
+            if success and response.StatusCode == 200 then
+                local data = HttpService:JSONDecode(response.Body)
+                if data and data.data then
+                    for _, server in ipairs(data.data) do
+                        if server.playing < server.maxPlayers and server.id ~= game.JobId then
+                            TeleportService:TeleportToPlaceInstance(game.PlaceId, server.id, LocalPlayer)
+                            task.wait(5)
+                            return
+                        end
+                    end
+                end
+            end
+        end
+        TeleportService:Teleport(game.PlaceId, LocalPlayer)
+    end)
+end
+
+local function CheckPlayerForAdmin(player)
+    if player == LocalPlayer then return end
+    task.spawn(function()
+        local success, rank = pcall(function() return player:GetRankInGroup(GROUP_ID) end)
+        if success and rank and rank > 1 then
+            if getgenv().AntiAdminEnabled then
+                local msg = "**Admin Detected**: `" .. player.Name .. "`\nIniciando Server Hop..."
+                sendNotification("Anti-Admin", "Admin: " .. player.Name .. "\nServer Hopping...", 5)
+                safeSendWebhook(msg)
+                ServerHop()
+            end
+        end
+    end)
+end
+
+getgenv().AntiAdminConnection = Players.PlayerAdded:Connect(CheckPlayerForAdmin)
+for _, p in ipairs(Players:GetPlayers()) do CheckPlayerForAdmin(p) end
+
+-- ==========================================
+-- CONTROLLER & UTILITIES
+-- ==========================================
+local MouseController = {
+    IsDown = false,
+    Set = function(self, state, force)
+        if self.IsDown ~= state or force then
+            local cx = Camera.ViewportSize.X / 2
+            local cy = Camera.ViewportSize.Y / 2
+            VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, state, game, 0)
+            self.IsDown = state
+        end
+    end
+}
+
+local LastTransparentOre = nil
+local function HandleOreTransparency(currentOre)
+    if LastTransparentOre ~= currentOre then
+        if LastTransparentOre and LastTransparentOre.Parent then
+            for _, part in ipairs(LastTransparentOre:GetDescendants()) do
+                if part:IsA("BasePart") then part.LocalTransparencyModifier = 0 end
+            end
+            if LastTransparentOre:IsA("BasePart") then LastTransparentOre.LocalTransparencyModifier = 0 end
+        end
+        LastTransparentOre = currentOre
+        if currentOre then
+            for _, part in ipairs(currentOre:GetDescendants()) do
+                if part:IsA("BasePart") then part.LocalTransparencyModifier = 0.85 end
+            end
+            if currentOre:IsA("BasePart") then currentOre.LocalTransparencyModifier = 0.85 end
+        end
+    end
+end
+
+-- ==========================================
+-- MINING HELPERS
+-- ==========================================
+local function getQTEMiningFrames()
+    local char = LocalPlayer.Character
+    if char and char:FindFirstChild("HumanoidRootPart") then
+        local miningGui = char.HumanoidRootPart:FindFirstChild("Mining")
+        if miningGui and miningGui:IsA("BillboardGui") then
+            local uiFrame = miningGui:FindFirstChild("Frame")
+            if uiFrame and uiFrame.Visible then
+                local amount = uiFrame:FindFirstChild("Amount")
+                if amount and miningGui.Enabled then return amount, uiFrame end
+            end
+        end
+    end
+    
+    local qte = PlayerGui:FindFirstChild("QuickTimeEvents")
+    if qte then
+        local events = qte:FindFirstChild("QTEClient") and qte.QTEClient:FindFirstChild("Events")
+        if events then
+            local miningEvent = events:FindFirstChild("Mining")
+            if miningEvent then
+                local miningInner = miningEvent:FindFirstChild("Mining")
+                if miningInner and miningInner.Enabled then
+                    local uiFrame = miningInner:FindFirstChild("Frame")
+                    if uiFrame and uiFrame.Visible and uiFrame:FindFirstChild("Amount") then
+                        return uiFrame.Amount, uiFrame
+                    end
+                end
+            end
+        end
+    end
+    return nil, nil
+end
+
+local function getTargetOresList()
+    local safeOres = {}
+    local islands = workspace:FindFirstChild("Islands")
+    local selectedZone = getgenv().TargetZone or "Todos"
+    if not islands then return safeOres end
+    
+    local function scanIslandForOres(islandName)
+        local islandFolder = islands:FindFirstChild(islandName)
+        if islandFolder and islandFolder:FindFirstChild("Island") then
+            for _, obj in pairs(islandFolder.Island:GetChildren()) do
+                if string.match(obj.Name, "^OreBlock") and obj:GetAttribute("Mined") ~= true then
+                    table.insert(safeOres, obj)
+                end
+            end
+        end
+    end
+
+    if selectedZone == "Todos" or selectedZone == "Anchor Town" then scanIslandForOres("Anchor Town") end
+    if selectedZone == "Todos" or selectedZone == "Maple Village" then scanIslandForOres("Maple Village") end
+    if selectedZone == "Todos" or selectedZone == "Clown Town" then scanIslandForOres("Clown Town") end
+    return safeOres
+end
+
+local function findNearestOre()
+    local nearestOre, shortestDistance = nil, math.huge
+    local char = LocalPlayer.Character
+    if char and char:FindFirstChild("HumanoidRootPart") then
+        local myPos = char.HumanoidRootPart.Position
+        for _, obj in pairs(getTargetOresList()) do
+            local orePos = nil
+            if obj:IsA("Model") and obj.PrimaryPart then
+                orePos = obj.PrimaryPart.Position
+            elseif obj:IsA("BasePart") then
+                orePos = obj.Position
+            else
+                local part = obj:FindFirstChildWhichIsA("BasePart")
+                if part then orePos = part.Position end
+            end
+            if orePos then
+                local distance = (orePos - myPos).Magnitude
+                if distance < shortestDistance then
+                    shortestDistance = distance
+                    nearestOre = obj
+                end
+            end
+        end
+    end
+    return nearestOre, shortestDistance
+end
+
+-- ==========================================
+-- FISHING & COMBAT HELPERS
+-- ==========================================
+local function CastAbility(moveName, state, isFingerAim, duration)
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+    
+    local rootCFrame = char.HumanoidRootPart.CFrame
+    local mouseCFrame = rootCFrame * CFrame.new(0, 0, -20)
+
+    local payload
+    if state == true then
+        payload = {{
+            State = true,
+            Character = char,
+            ExtraInfo = { InAir = false, AltCast = false },
+            Input = moveName,
+            ID = moveName,
+            MoveDirection = Vector3.zero
+        }}
+    else
+        payload = {{
+            FingerAim = isFingerAim or false,
+            ExtraInfo = { InAir = false },
+            CFrame = rootCFrame,
+            Targets = {},
+            State = false,
+            Character = char,
+            HeldDuration = duration or 0.05,
+            Input = moveName,
+            Mouse = mouseCFrame,
+            ID = moveName
+        }}
+    end
+
+    InputEvent:FireServer(unpack(payload))
+end
+
+local function GetTargetFishFolk()
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
+    
+    local hrp = char.HumanoidRootPart
+    for _, obj in pairs(workspace:GetDescendants()) do
+        if obj:IsA("Model") and string.find(string.lower(obj.Name), "fishfolk") then
+            local targetHrp = obj:FindFirstChild("HumanoidRootPart")
+            local targetHum = obj:FindFirstChildOfClass("Humanoid")
+            if targetHrp and targetHum and targetHum.Health > 0 then
+                if (targetHrp.Position - hrp.Position).Magnitude < 100 then
+                    return obj
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function EquipFishingRod()
+    local char = LocalPlayer.Character
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    if not char or not backpack then return end
+
+    if not char:FindFirstChild("Fishing Rod") then
+        local rod = backpack:FindFirstChild("Fishing Rod") or backpack:FindFirstChildOfClass("Tool")
+        if rod then
+            char.Humanoid:EquipTool(rod)
+        end
+    end
+end
+
+local function getFishingCastFrames()
+    local qte = PlayerGui:FindFirstChild("QuickTimeEvents")
+    if qte then
+        local qteClient = qte:FindFirstChild("QTEClient")
+        if qteClient then
+            local events = qteClient:FindFirstChild("Events")
+            if events then
+                local timedRelease = events:FindFirstChild("Timed Release")
+                if timedRelease then
+                    local fishingBar = timedRelease:FindFirstChild("Fishing Bar")
+                    if fishingBar then
+                        local success, isEnabled = pcall(function() return fishingBar.Enabled end)
+                        if success and isEnabled then
+                            local uiFrame = fishingBar:FindFirstChild("Frame")
+                            if uiFrame and uiFrame.Visible then
+                                local amount = uiFrame:FindFirstChild("Amount")
+                                if amount then return amount, uiFrame end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return nil, nil
+end
+
+local function CalculateRelease(amountBar, parentFrame)
+    if parentFrame.AbsoluteSize.X > 5 and parentFrame.AbsoluteSize.Y > 5 then
+        local isHorizontal = parentFrame.AbsoluteSize.X > parentFrame.AbsoluteSize.Y
+        local targetZone = nil
+        for _, child in ipairs(parentFrame:GetChildren()) do
+            if (child:IsA("Frame") or child:IsA("ImageLabel")) and child.Name ~= "Amount" and child.Name ~= "Background" and child.Name ~= "UIStroke" and child.Name ~= "UICorner" then
+                if child:IsA("Frame") and child.BackgroundColor3.G > 0.4 and child.BackgroundColor3.R < 0.6 then
+                    targetZone = child
+                    break
+                elseif not targetZone then
+                    targetZone = child
+                end
+            end
+        end
+        local requiredFill = FALLBACK_TARGET
+        if targetZone then
+            if isHorizontal then
+                local parentWidth = parentFrame.AbsoluteSize.X
+                local targetHitX = targetZone.AbsolutePosition.X + (targetZone.AbsoluteSize.X * 0.2)
+                local parentLeft = parentFrame.AbsolutePosition.X
+                requiredFill = (targetHitX - parentLeft) / parentWidth
+            else
+                local parentHeight = parentFrame.AbsoluteSize.Y
+                local targetHitY = targetZone.AbsolutePosition.Y + (targetZone.AbsoluteSize.Y * 0.8)
+                local parentBottom = parentFrame.AbsolutePosition.Y + parentFrame.AbsoluteSize.Y
+                requiredFill = (parentBottom - targetHitY) / parentHeight
+            end
+        end
+        local currentFill = isHorizontal and (amountBar.AbsoluteSize.X / parentFrame.AbsoluteSize.X) or (amountBar.AbsoluteSize.Y / parentFrame.AbsoluteSize.Y)
+        if currentFill >= (requiredFill - LAG_OFFSET) then
+            return true
+        end
+    end
+    return false
+end
+
+local function GetCastFillPercentage(amountBar, parentFrame)
+    if parentFrame.AbsoluteSize.X > 5 and parentFrame.AbsoluteSize.Y > 5 then
+        local isHorizontal = parentFrame.AbsoluteSize.X > parentFrame.AbsoluteSize.Y
+        return isHorizontal 
+            and (amountBar.AbsoluteSize.X / parentFrame.AbsoluteSize.X) 
+            or (amountBar.AbsoluteSize.Y / parentFrame.AbsoluteSize.Y)
+    end
+    return 0
+end
+
+-- ==========================================
+-- REEL TRACKING (RenderStepped Zero Delay)
+-- ==========================================
+local isMinigameActive = false
+
+getgenv().ReelTrackingConnection = RunService.RenderStepped:Connect(function()
+    if not getgenv().AutoFishEnabled then 
+        isMinigameActive = false
+        return 
+    end
+
+    local fishingGui = PlayerGui:FindFirstChild("Fishing")
+    local main = fishingGui and fishingGui:FindFirstChild("Main")
+
+    if fishingGui and fishingGui.Enabled and main and main.Visible and main:FindFirstChild("Fish") and main:FindFirstChild("Move") then
+        isMinigameActive = true
+        local fish = main.Fish
+        local move = main.Move
+        
+        local fX = fish.AbsolutePosition.X + (fish.AbsoluteSize.X / 2)
+        local mX = move.AbsolutePosition.X + (move.AbsoluteSize.X / 2)
+        
+        if mX < fX then
+            MouseController:Set(true)
+        else
+            MouseController:Set(false)
+        end
+    else
+        isMinigameActive = false
+    end
+end)
+
+-- ==========================================
+-- NOCLIP & FLOAT CONNECTION
+-- ==========================================
+getgenv().NoclipConnection = RunService.Stepped:Connect(function()
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+    
+    if getgenv().AutoFishEnabled or getgenv().AutoMineEnabled then
+        local hrp = char.HumanoidRootPart
+        local float = hrp:FindFirstChild("AutoFarmFloat")
+        if not float then
+            float = Instance.new("BodyVelocity")
+            float.Name = "AutoFarmFloat"
+            float.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+            float.Velocity = Vector3.new(0, 0, 0)
+            float.Parent = hrp
+        end
+        
+        for _, part in pairs(char:GetDescendants()) do
+            if part:IsA("BasePart") and part.CanCollide then
+                part.CanCollide = false
+            end
+        end
+    else
+        local float = char.HumanoidRootPart:FindFirstChild("AutoFarmFloat")
+        if float then float:Destroy() end
+    end
+end)
+
+-- ==========================================
+-- ENHANCED PLAYER ESP & TRACERS SYSTEM
+-- ==========================================
+local ESPFolder = Instance.new("Folder")
+ESPFolder.Name = "ESP_Storage"
+ESPFolder.Parent = (gethui and gethui()) or CoreGui
+
+local function GetBounty(player)
+    local leaderstats = player:FindFirstChild("leaderstats")
+    if leaderstats then
+        local bounty = leaderstats:FindFirstChild("Bounty") or leaderstats:FindFirstChild("Berries")
+        if bounty then return tostring(bounty.Value) end
+    end
+    return "0"
+end
+
+local function RemoveESP(player)
+    if ESPFolder:FindFirstChild(player.Name) then
+        ESPFolder[player.Name]:Destroy()
+    end
+end
+
+local function CreateESP(player)
+    if player == LocalPlayer then return end
+
+    local function ApplyESP()
+        RemoveESP(player)
+
+        local char = player.Character
+        if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+
+        local container = Instance.new("Folder")
+        container.Name = player.Name
+        container.Parent = ESPFolder
+
+        -- 1. HIGHLIGHT (Wallhack Visual Overlay - Visible Through Walls)
+        local highlight = Instance.new("Highlight")
+        highlight.Name = "ESPHighlight"
+        highlight.Adornee = char
+        highlight.FillColor = Color3.fromRGB(255, 50, 50)
+        highlight.FillTransparency = 0.5
+        highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+        highlight.OutlineTransparency = 0
+        highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        highlight.Parent = container
+
+        -- 2. BILLBOARD GUI (Format: Jarak | Bounty | Nama)
+        local billboard = Instance.new("BillboardGui")
+        billboard.Name = "ESPInfo"
+        billboard.Adornee = char:FindFirstChild("Head") or char.HumanoidRootPart
+        billboard.Size = UDim2.new(0, 200, 0, 50)
+        billboard.StudsOffset = Vector3.new(0, 3, 0)
+        billboard.AlwaysOnTop = true
+        billboard.Parent = container
+
+        local textLabel = Instance.new("TextLabel")
+        textLabel.Size = UDim2.new(1, 0, 1, 0)
+        textLabel.BackgroundTransparency = 1
+        textLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+        textLabel.TextStrokeTransparency = 0
+        textLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+        textLabel.Font = Enum.Font.SourceSansBold
+        textLabel.TextSize = 14
+        textLabel.Parent = billboard
+
+        -- 3. TRACER LINE & TARGET LABEL
+        local tracer = Drawing.new("Line")
+        tracer.Visible = false
+        tracer.Color = Color3.fromRGB(255, 255, 0)
+        tracer.Thickness = 1.5
+        tracer.Transparency = 1
+
+        local tracerText = Drawing.new("Text")
+        tracerText.Visible = false
+        tracerText.Color = Color3.fromRGB(255, 255, 0)
+        tracerText.Size = 13
+        tracerText.Center = true
+        tracerText.Outline = true
+        tracerText.Font = 2
+
+        -- Render Loop
+        local connection
+        connection = RunService.RenderStepped:Connect(function()
+            if not player.Parent or not char or not char:FindFirstChild("HumanoidRootPart") or not getgenv().PlayerESPEnabled then
+                tracer.Visible = false
+                tracerText.Visible = false
+                highlight.Enabled = false
+                billboard.Enabled = false
+                if not player.Parent then
+                    RemoveESP(player)
+                    tracer:Remove()
+                    tracerText:Remove()
+                    connection:Disconnect()
+                end
+                return
+            end
+
+            highlight.Enabled = true
+            billboard.Enabled = true
+
+            local myChar = LocalPlayer.Character
+            if not myChar or not myChar:FindFirstChild("HumanoidRootPart") then
+                tracer.Visible = false
+                tracerText.Visible = false
+                return
+            end
+
+            local myPos = myChar.HumanoidRootPart.Position
+            local targetPos = char.HumanoidRootPart.Position
+            local distance = math.floor((targetPos - myPos).Magnitude)
+            local bounty = GetBounty(player)
+
+            -- Format Susunan: Jarak -> Bounty -> Nama Player
+            textLabel.Text = string.format("[%d Studs] | Bounty: %s\n%s", distance, bounty, player.Name)
+
+            -- Update Tracer Line & Info
+            local screenPos, onScreen = Camera:WorldToViewportPoint(targetPos)
+            if onScreen and getgenv().TracersEnabled then
+                local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y)
+                
+                tracer.From = screenCenter
+                tracer.To = Vector2.new(screenPos.X, screenPos.Y)
+                tracer.Visible = true
+
+                -- Info Garis Tracking: Nama Target & Jarak
+                tracerText.Position = Vector2.new((screenCenter.X + screenPos.X) / 2, (screenCenter.Y + screenPos.Y) / 2 - 10)
+                tracerText.Text = string.format("%s (%d studs)", player.Name, distance)
+                tracerText.Visible = true
+            else
+                tracer.Visible = false
+                tracerText.Visible = false
+            end
+        end)
+    end
+
+    if player.Character then ApplyESP() end
+    player.CharacterAdded:Connect(ApplyESP)
+end
+
+for _, p in ipairs(Players:GetPlayers()) do CreateESP(p) end
+Players.PlayerAdded:Connect(CreateESP)
+Players.PlayerRemoving:Connect(RemoveESP)
+
+-- ==========================================
+-- CLEANUP PROCEDURE
+-- ==========================================
+local function performCleanup()
+    getgenv().AutoFarmingRunning = false
+    getgenv().AutoMineEnabled = false
+    getgenv().AutoFishEnabled = false
+    getgenv().AntiAdminEnabled = false
+    getgenv().PlayerESPEnabled = false
+    getgenv().TracersEnabled = false
+    
+    if getgenv().NoclipConnection then getgenv().NoclipConnection:Disconnect() getgenv().NoclipConnection = nil end
+    if getgenv().AntiAdminConnection then getgenv().AntiAdminConnection:Disconnect() getgenv().AntiAdminConnection = nil end
+    if getgenv().ReelTrackingConnection then getgenv().ReelTrackingConnection:Disconnect() getgenv().ReelTrackingConnection = nil end
+    
+    MouseController:Set(false, true)
+    LocalPlayer.DevCameraOcclusionMode = Enum.DevCameraOcclusionMode.Zoom
+    HandleOreTransparency(nil)
+    
+    if workspace:FindFirstChild("CustomAutoFarmBase_Sky") then
+        workspace.CustomAutoFarmBase_Sky:Destroy()
+    end
+    
+    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+        local float = LocalPlayer.Character.HumanoidRootPart:FindFirstChild("AutoFarmFloat")
+        if float then float:Destroy() end
+        for _, part in pairs(LocalPlayer.Character:GetDescendants()) do
+            if part:IsA("BasePart") then part.CanCollide = true end
+        end
+    end
+    
+    ESPFolder:ClearAllChildren()
+end
+
+-- ==========================================
+-- USER INTERFACE (GUI) SETUP
+-- ==========================================
+local ScreenGui = Instance.new("ScreenGui", (gethui and gethui()) or CoreGui or PlayerGui)
+ScreenGui.Name = uiName
+ScreenGui.AncestryChanged:Connect(function(_, parent)
+    if not parent then performCleanup() end
+end)
+
+local Main = Instance.new("Frame", ScreenGui)
+Main.Size = UDim2.new(0, 220, 0, 360)
+Main.Position = UDim2.new(0.5, -110, 0.5, -180)
+Main.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+Main.BorderSizePixel = 0
+Main.Active = true
+
+local MainCorner = Instance.new("UICorner", Main)
+MainCorner.CornerRadius = UDim.new(0, 8)
+
+local Title = Instance.new("TextLabel", Main)
+Title.Size = UDim2.new(1, -25, 0, 28)
+Title.BackgroundColor3 = Color3.fromRGB(15, 15, 18)
+Title.TextColor3 = Color3.fromRGB(240, 240, 240)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 11
+Title.Text = "  GrandBlue Hub v2.3"
+Title.TextXAlignment = Enum.TextXAlignment.Left
+
+local TitleCorner = Instance.new("UICorner", Title)
+TitleCorner.CornerRadius = UDim.new(0, 8)
+
+local CloseBtn = Instance.new("TextButton", Main)
+CloseBtn.Size = UDim2.new(0, 25, 0, 28)
+CloseBtn.Position = UDim2.new(1, -25, 0, 0)
+CloseBtn.BackgroundTransparency = 1
+CloseBtn.TextColor3 = Color3.fromRGB(220, 60, 60)
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextSize = 13
+CloseBtn.Text = "✕"
+CloseBtn.MouseButton1Click:Connect(function() ScreenGui:Destroy() end)
+
+local function MakeDraggable(dragHandle, targetObject)
+    local dragging, dragInput, dragStart, startPos
+    dragHandle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = targetObject.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    dragHandle.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            dragInput = input
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then
+            local delta = input.Position - dragStart
+            targetObject.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+end
+MakeDraggable(Title, Main)
+
+local function CreateButton(text, pos, size, parent)
+    local btn = Instance.new("TextButton")
+    btn.Size = size
+    btn.Position = pos
+    btn.Text = text
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+    btn.Font = Enum.Font.SourceSansSemibold
+    btn.TextSize = 13
+    btn.Parent = parent
+    
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 6)
+    corner.Parent = btn
+    return btn
+end
+
+-- GUI Buttons
+local MineToggleBtn = CreateButton("Auto Mine: OFF", UDim2.new(0.05, 0, 0.10, 0), UDim2.new(0.9, 0, 0, 32), Main)
+MineToggleBtn.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+
+MineToggleBtn.MouseButton1Click:Connect(function()
+    getgenv().AutoMineEnabled = not getgenv().AutoMineEnabled
+    MineToggleBtn.Text = "Auto Mine: " .. (getgenv().AutoMineEnabled and "ON" or "OFF")
+    MineToggleBtn.BackgroundColor3 = getgenv().AutoMineEnabled and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(180, 50, 50)
+end)
+
+local FishToggleBtn = CreateButton("Auto Fish: OFF", UDim2.new(0.05, 0, 0.22, 0), UDim2.new(0.9, 0, 0, 32), Main)
+FishToggleBtn.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+
+FishToggleBtn.MouseButton1Click:Connect(function()
+    getgenv().AutoFishEnabled = not getgenv().AutoFishEnabled
+    if getgenv().AutoFishEnabled then
+        FishToggleBtn.Text = "Auto Fish: ON"
+        FishToggleBtn.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+        if LocalPlayer.Character then
+            LocalPlayer.Character:PivotTo(FISH_ZONE_CFRAME)
+        end
+    else
+        FishToggleBtn.Text = "Auto Fish: OFF"
+        FishToggleBtn.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+    end
+end)
+
+local ESPToggleBtn = CreateButton("Player ESP: ON", UDim2.new(0.05, 0, 0.34, 0), UDim2.new(0.9, 0, 0, 32), Main)
+ESPToggleBtn.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+
+ESPToggleBtn.MouseButton1Click:Connect(function()
+    getgenv().PlayerESPEnabled = not getgenv().PlayerESPEnabled
+    ESPToggleBtn.Text = "Player ESP: " .. (getgenv().PlayerESPEnabled and "ON" or "OFF")
+    ESPToggleBtn.BackgroundColor3 = getgenv().PlayerESPEnabled and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(180, 50, 50)
+end)
+
+local TracerToggleBtn = CreateButton("Tracers Line: ON", UDim2.new(0.05, 0, 0.46, 0), UDim2.new(0.9, 0, 0, 32), Main)
+TracerToggleBtn.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+
+TracerToggleBtn.MouseButton1Click:Connect(function()
+    getgenv().TracersEnabled = not getgenv().TracersEnabled
+    TracerToggleBtn.Text = "Tracers Line: " .. (getgenv().TracersEnabled and "ON" or "OFF")
+    TracerToggleBtn.BackgroundColor3 = getgenv().TracersEnabled and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(180, 50, 50)
+end)
+
+local DefendToggleBtn = CreateButton("Auto-Defend: ON", UDim2.new(0.05, 0, 0.58, 0), UDim2.new(0.9, 0, 0, 32), Main)
+DefendToggleBtn.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+
+DefendToggleBtn.MouseButton1Click:Connect(function()
+    getgenv().AutoDefendEnabled = not getgenv().AutoDefendEnabled
+    DefendToggleBtn.Text = "Auto-Defend: " .. (getgenv().AutoDefendEnabled and "ON" or "OFF")
+    DefendToggleBtn.BackgroundColor3 = getgenv().AutoDefendEnabled and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(180, 50, 50)
+end)
+
+local AntiAdminBtn = CreateButton("Anti-Admin: " .. (getgenv().AntiAdminEnabled and "ON" or "OFF"), UDim2.new(0.05, 0, 0.70, 0), UDim2.new(0.9, 0, 0, 32), Main)
+AntiAdminBtn.BackgroundColor3 = getgenv().AntiAdminEnabled and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(180, 50, 50)
+
+AntiAdminBtn.MouseButton1Click:Connect(function()
+    getgenv().AntiAdminEnabled = not getgenv().AntiAdminEnabled
+    AntiAdminBtn.Text = "Anti-Admin: " .. (getgenv().AntiAdminEnabled and "ON" or "OFF")
+    AntiAdminBtn.BackgroundColor3 = getgenv().AntiAdminEnabled and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(180, 50, 50)
+    SaveConfig()
+end)
+
+local HopBtn = CreateButton("Server Hop", UDim2.new(0.05, 0, 0.82, 0), UDim2.new(0.9, 0, 0, 32), Main)
+HopBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 120)
+HopBtn.MouseButton1Click:Connect(function() ServerHop() end)
+
+-- ==========================================
+-- MAIN AUTOMATION WORKER LOOP
+-- ==========================================
+task.spawn(function()
+    local wasMinigameActive = false
+
+    while true do
+        task.wait(0.01)
+
+        -- --------------------------------------
+        -- 1. AUTO MINE ROUTINE
+        -- --------------------------------------
+        if getgenv().AutoMineEnabled then
+            local nearestOre, distance = findNearestOre()
+            local char = LocalPlayer.Character
+            
+            if nearestOre and char and char:FindFirstChild("HumanoidRootPart") then
+                HandleOreTransparency(nearestOre)
+                
+                local targetPos
+                if nearestOre:IsA("Model") and nearestOre.PrimaryPart then
+                    targetPos = nearestOre.PrimaryPart.Position
+                elseif nearestOre:IsA("BasePart") then
+                    targetPos = nearestOre.Position
+                else
+                    local p = nearestOre:FindFirstChildWhichIsA("BasePart")
+                    if p then targetPos = p.Position end
+                end
+
+                if targetPos then
+                    char:PivotTo(CFrame.new(targetPos + Vector3.new(0, 3, 0)))
+                    
+                    local amountBar, parentFrame = getQTEMiningFrames()
+                    if amountBar and parentFrame then
+                        if CalculateRelease(amountBar, parentFrame) then
+                            MouseController:Set(false)
+                            task.wait(0.05)
+                        else
+                            MouseController:Set(true)
+                        end
+                    else
+                        MouseController:Set(true)
+                    end
+                end
+            else
+                HandleOreTransparency(nil)
+                MouseController:Set(false)
+            end
+            continue
+        end
+
+        -- --------------------------------------
+        -- 2. AUTO FISH ROUTINE
+        -- --------------------------------------
+        if not getgenv().AutoFishEnabled then
+            if not getgenv().AutoMineEnabled and MouseController.IsDown then 
+                MouseController:Set(false) 
+            end
+            task.wait(0.2)
+            continue
+        end
+
+        -- Handled by RenderStepped reel tracking
+        if isMinigameActive then
+            wasMinigameActive = true
+            continue
+        end
+
+        if wasMinigameActive then
+            MouseController:Set(false)
+            task.wait(1.2)
+            wasMinigameActive = false
+            EquipFishingRod()
+            continue
+        end
+
+        -- Auto-Defense Check
+        local fishFolk = GetTargetFishFolk()
+        if fishFolk and getgenv().AutoDefendEnabled then
+            MouseController:Set(false)
+            
+            CastAbility("Flame Fist", true)
+            task.wait(0.03)
+            CastAbility("Flame Fist", false, true, 2.4)
+            task.wait(0.5)
+
+            if not GetTargetFishFolk() then
+                EquipFishingRod()
+            end
+            continue
+        end
+
+        -- Shake QTE Prompts Check
+        local qte = PlayerGui:FindFirstChild("QuickTimeEvents")
+        local shakeActive = false
+        if qte then
+            local btn = qte:FindFirstChild("Button")
+            local isVisible = false
+            pcall(function()
+                if btn and (btn.Visible or btn.AbsoluteSize.X > 0) then isVisible = true end
+            end)
+            if isVisible then
+                shakeActive = true
+                local clicked = false
+                if getconnections then
+                    pcall(function()
+                        for _, conn in pairs(getconnections(btn.MouseButton1Click)) do conn:Fire() end
+                        for _, conn in pairs(getconnections(btn.MouseButton1Down)) do conn:Fire() end
+                        for _, conn in pairs(getconnections(btn.Activated)) do conn:Fire() end
+                        clicked = true
+                    end)
+                end
+                if not clicked and firesignal then
+                    pcall(function()
+                        firesignal(btn.MouseButton1Click)
+                        firesignal(btn.MouseButton1Down)
+                        firesignal(btn.Activated)
+                        clicked = true
+                    end)
+                end
+                if not clicked then
+                    MouseController:Set(false)
+                    local inset = GuiService:GetGuiInset()
+                    local btnX = btn.AbsolutePosition.X + (btn.AbsoluteSize.X / 2)
+                    local btnY = btn.AbsolutePosition.Y + (btn.AbsoluteSize.Y / 2) + inset.Y
+                    VirtualInputManager:SendMouseButtonEvent(btnX, btnY, 0, true, game, 1)
+                    task.wait(0.01)
+                    VirtualInputManager:SendMouseButtonEvent(btnX, btnY, 0, false, game, 1)
+                end
+                task.wait(0.05)
+            end
+        end
+
+        if shakeActive then continue end
+
+        -- Continuous Perfect Cast Charging
+        local fishingGui = PlayerGui:FindFirstChild("Fishing")
+        if fishingGui and fishingGui.Enabled then
+            MouseController:Set(false)
+            continue
+        end
+
+        EquipFishingRod()
+
+        local castAmountBar, castParentFrame = getFishingCastFrames()
+        if castAmountBar and castParentFrame then
+            local currentFill = GetCastFillPercentage(castAmountBar, castParentFrame)
+            if currentFill >= 0.98 then
+                MouseController:Set(false)
+                task.wait(1.0)
+            else
+                MouseController:Set(true)
+            end
+        else
+            MouseController:Set(true)
+        end
+    end
+end)
