@@ -1,9 +1,7 @@
 local base = "https://raw.githubusercontent.com/Takuya-rif/Learning/main/"
 
 local files = {
-    "combat.lua",
-    "farm.lua",
-    "utility.lua"
+    "grndblue%20v2.7.txt"
 }
 
 for _, file in ipairs(files) do
